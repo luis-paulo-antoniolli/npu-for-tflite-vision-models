@@ -1,0 +1,32 @@
+module tflite_softcore (
+    input clk,
+    input rst_n,
+    
+    // Interface de memória unificada (multiplexada)
+    input [31:0] bus_addr,
+    input [31:0] bus_data_in,
+    input [2:0] bus_cmd,  // 000=read, 001=write, 010=instr_fetch
+    input bus_ready,
+    output reg [31:0] bus_data_out,
+    output reg bus_req,
+    
+    // Interface com aceleradores ML
+    input [31:0] ml_data_in,
+    input ml_cmd_valid,
+    output reg [31:0] ml_data_out,
+    output reg ml_result_valid,
+    output reg ml_ready,
+    
+    // Interface PCIe
+    input [31:0] pcie_data_in,
+    input pcie_rx_valid,
+    input pcie_tx_ready,
+    output reg [31:0] pcie_data_out,
+    output reg pcie_tx_valid,
+    
+    // Sinais de status
+    output reg [31:0] pc_out,
+    output reg [31:0] alu_result_out,
+    output reg ready_out,
+    output reg done_out
+);
