@@ -1,0 +1,322 @@
+module npu_top #(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32
+)(
+    input clk,
+    input rst_n,
+    
+    // Interface com o softcore
+    input  [ADDR_WIDTH-1:0] bus_addr,
+    input  [DATA_WIDTH-1:0] bus_data_in,
+    input  [2:0] bus_cmd,
+    input  bus_ready,
+    output reg [DATA_WIDTH-1:0] bus_data_out,
+    output reg bus_req,
+    
+    // Interface com memória externa
+    output reg [ADDR_WIDTH-1:0] mem_addr,
+    output reg [DATA_WIDTH-1:0] mem_data_out,
+    output reg mem_we,
+    output reg mem_re,
+    input  [DATA_WIDTH-1:0] mem_data_in,
+    input  mem_mem_ready,
+    
+    // Sinais de status
+    output reg ready,
+    output reg done
+);
+
+    // Sinais internos para os aceleradores
+    reg  [DATA_WIDTH-1:0] conv2d_cmd;
+    reg  conv2d_start;
+    wire conv2d_done;
+    wire [DATA_WIDTH-1:0] conv2d_result;
+
+    reg  [DATA_WIDTH-1:0] fc_cmd;
+    reg  fc_start;
+    wire fc_done;
+    wire [DATA_WIDTH-1:0] fc_result;
+
+    reg  [DATA_WIDTH-1:0] dwconv2d_cmd;
+    reg  dwconv2d_start;
+    wire dwconv2d_done;
+    wire [DATA_WIDTH-1:0] dwconv2d_result;
+
+    reg  [DATA_WIDTH-1:0] matadd_cmd;
+    reg  matadd_start;
+    wire matadd_done;
+    wire [DATA_WIDTH-1:0] matadd_result;
+    
+    // Registradores para controle
+    reg [DATA_WIDTH-1:0] current_cmd;
+    reg [2:0] current_op;
+    reg operation_start;
+    reg operation_done;
+    
+    // Estado da FSM
+    localparam IDLE      = 3'b000;
+    localparam DECODE    = 3'b001;
+    localparam EXECUTE   = 3'b010;
+    localparam WAIT_DONE = 3'b011;
+    localparam COMPLETE  = 3'b100;
+    
+    reg [2:0] state, next_state;
+    
+    // ========= SINAIS DE MEMÓRIA SEPARADOS =========
+    wire [ADDR_WIDTH-1:0] conv2d_mem_addr, fc_mem_addr;
+    wire [DATA_WIDTH-1:0] conv2d_mem_data_out, fc_mem_data_out;
+    wire conv2d_mem_we, conv2d_mem_re;
+    wire fc_mem_we, fc_mem_re;
+
+    // FSM sequencial
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            state <= IDLE;
+            done <= 0;
+            ready <= 1;
+        end else begin
+            state <= next_state;
+            
+            case(state)
+                IDLE: begin
+                    done <= 0;
+                    ready <= 1;
+                end
+                COMPLETE: begin
+                    done <= 1;
+                    ready <= 1;
+                end
+                default: begin
+                    done <= 0;
+                    ready <= 0;
+                end
+            endcase
+        end
+    end
+    
+    // FSM combinacional
+    always @(*) begin
+        case(state)
+            IDLE: begin
+                if (bus_cmd == 3'b010 && bus_ready) // Command fetch
+                    next_state = DECODE;
+                else
+                    next_state = IDLE;
+            end
+            DECODE: begin
+                next_state = EXECUTE;
+            end
+            EXECUTE: begin
+                next_state = WAIT_DONE;
+            end
+            WAIT_DONE: begin
+                if (operation_done)
+                    next_state = COMPLETE;
+                else
+                    next_state = WAIT_DONE;
+            end
+            COMPLETE: begin
+                next_state = IDLE;
+            end
+            default: next_state = IDLE;
+        endcase
+    end
+    
+    // Lógica de controle
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            current_cmd <= 0;
+            current_op <= 0;
+            operation_start <= 0;
+            bus_req <= 0;
+            mem_addr <= 0;
+            mem_data_out <= 0;
+            mem_we <= 0;
+            mem_re <= 0;
+        end else begin
+            case(state)
+                IDLE: begin
+                    operation_start <= 0;
+                    bus_req <= 0;
+                    mem_we <= 0;
+                    mem_re <= 0;
+                end
+                
+                DECODE: begin
+                    // Decodificar comando
+                    current_cmd <= bus_data_in;
+                    current_op <= bus_data_in[DATA_WIDTH-1:DATA_WIDTH-3]; // Opcode nos 3 bits MSB
+                    operation_start <= 1;
+                    bus_req <= 1;
+                end
+                
+                EXECUTE: begin
+                    operation_start <= 0;
+                    // Configurar acelerador apropriado
+                    case(current_op)
+                        3'b000: begin // Conv2D
+                            conv2d_cmd <= current_cmd;
+                            conv2d_start <= 1;
+                        end
+                        3'b001: begin // Fully Connected
+                            fc_cmd <= current_cmd;
+                            fc_start <= 1;
+                        end
+                        3'b010: begin // Depthwise Conv2D
+                            dwconv2d_cmd <= current_cmd;
+                            dwconv2d_start <= 1;
+                        end
+                        3'b011: begin // Matrix Addition
+                            matadd_cmd <= current_cmd;
+                            matadd_start <= 1;
+                        end
+                        default: begin
+                            conv2d_start <= 0;
+                            fc_start <= 0;
+                            dwconv2d_start <= 0;
+                            matadd_start <= 0;
+                        end
+                    endcase
+                end
+                
+                WAIT_DONE: begin
+                    // Desativar sinais de start
+                    conv2d_start <= 0;
+                    fc_start <= 0;
+                    dwconv2d_start <= 0;
+                    matadd_start <= 0;
+                    
+                    // Verificar conclusão
+                    case(current_op)
+                        3'b000: operation_done = conv2d_done;
+                        3'b001: operation_done = fc_done;
+                        3'b010: operation_done = dwconv2d_done;
+                        3'b011: operation_done = matadd_done;
+                        default: operation_done = 1'b1;
+                    endcase
+                    
+                    // Retornar resultado
+                    if (operation_done) begin
+                        case(current_op)
+                            3'b000: bus_data_out <= conv2d_result;
+                            3'b001: bus_data_out <= fc_result;
+                            3'b010: bus_data_out <= dwconv2d_result;
+                            3'b011: bus_data_out <= matadd_result;
+                            default: bus_data_out <= {DATA_WIDTH{1'b0}};
+                        endcase
+                    end
+                end
+                
+                COMPLETE: begin
+                    // Reset para próximo comando
+                end
+                
+                default: begin
+                    // Manter valores
+                end
+            endcase
+        end
+    end
+
+    // ========= MUX DE MEMÓRIA =========
+    always @(*) begin
+        case(current_op)
+            3'b000: begin // conv2d
+                mem_addr     = conv2d_mem_addr;
+                mem_data_out = conv2d_mem_data_out;
+                mem_we       = conv2d_mem_we;
+                mem_re       = conv2d_mem_re;
+            end
+            3'b001: begin // fc
+                mem_addr     = fc_mem_addr;
+                mem_data_out = fc_mem_data_out;
+                mem_we       = fc_mem_we;
+                mem_re       = fc_mem_re;
+            end
+            default: begin
+                mem_addr     = {ADDR_WIDTH{1'b0}};
+                mem_data_out = {DATA_WIDTH{1'b0}};
+                mem_we       = 1'b0;
+                mem_re       = 1'b0;
+            end
+        endcase
+    end
+    
+    // Instâncias dos aceleradores
+    conv2d_accelerator conv2d_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .cmd(conv2d_cmd),
+        .start(conv2d_start),
+        .done(conv2d_done),
+        .ready(),
+        .mem_addr(conv2d_mem_addr),
+        .mem_data_in(mem_data_in),
+        .mem_we(conv2d_mem_we),
+        .mem_re(conv2d_mem_re),
+        .mem_data_out(conv2d_mem_data_out),
+        .mem_ready(mem_mem_ready),
+        .input_height(conv2d_cmd[15:0]),      // Exemplo
+        .input_width(conv2d_cmd[DATA_WIDTH-1:16]),
+        .input_channels(3),
+        .output_height(6),
+        .output_width(6),
+        .output_channels(16),
+        .kernel_height(3),
+        .kernel_width(3),
+        .stride_h(1),
+        .stride_w(1),
+        .pad_h(0),
+        .pad_w(0),
+        .result(conv2d_result)
+    );
+    
+    fully_connected_accelerator fc_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .cmd(fc_cmd),
+        .start(fc_start),
+        .done(fc_done),
+        .ready(),
+        .mem_addr(fc_mem_addr),
+        .mem_data_in(mem_data_in),
+        .mem_we(fc_mem_we),
+        .mem_re(fc_mem_re),
+        .mem_data_out(fc_mem_data_out),
+        .mem_ready(mem_mem_ready),
+        .input_size(fc_cmd[15:0]),
+        .output_size(fc_cmd[DATA_WIDTH-1:16]),
+        .result(fc_result)
+    );
+    
+    dwconv2d_unit dwconv2d_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(dwconv2d_start),
+        .input_ptr(dwconv2d_cmd[DATA_WIDTH-1:0]),
+        .filter_ptr(dwconv2d_cmd[DATA_WIDTH-1:0]),
+        .output_ptr(dwconv2d_cmd[DATA_WIDTH-1:0]),
+        .input_dims(32'h01080803),
+        .filter_dims(32'h03030310),
+        .output_dims(32'h01060610),
+        .stride(32'h00010001),
+        .padding(32'h00000000),
+        .result(dwconv2d_result),
+        .done(dwconv2d_done),
+        .ready()
+    );
+    
+    matadd_unit matadd_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(matadd_start),
+        .mat1_ptr(matadd_cmd[DATA_WIDTH-1:0]),
+        .mat2_ptr(matadd_cmd[DATA_WIDTH-1:0]),
+        .output_ptr(matadd_cmd[DATA_WIDTH-1:0]),
+        .matrix_dims(32'h01000100),
+        .result(matadd_result),
+        .done(matadd_done),
+        .ready()
+    );
+
+endmodule
