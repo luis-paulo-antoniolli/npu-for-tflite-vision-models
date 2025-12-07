@@ -4,7 +4,7 @@
 
 Este projeto implementa um NPU (Neural Processing Unit) em Verilog otimizado especificamente para o FPGA Xilinx Kintex UltraScale+ XCKU5P-FFVB676-2-I. O design aproveita ao máximo os recursos do FPGA, incluindo 1.440 DSPs, 2.048 MB BRAM e 48 UltraRAM, para acelerar inferências de modelos TensorFlow Lite.
 Obs:o projeto ainda apresenta muita instabilidade, portanto não é recomendado utiliza-lo em aplicações críticas.
-Fiz este projeto com 17 anos então tenha paciência com algunas erros crassos, por favor.
+Fiz este projeto com 17 anos e com auxilio do qwen-coder (era o que tinha disponivel) então peço que tenha paciência com algunas erros crassos.
 Peço por sugestões de melhorias e se possivel faça um branch e resolva o problema que com certeza eu irei incorporar sua solução na main.
 
 ## Características Otimizadas para XCKU5P
